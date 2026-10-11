@@ -1,9 +1,9 @@
-// Erha: the Community app's assistant for church life, on Claude.
+// Erha: the Community app's assistant for church life, powered by Google AI (Gemini).
 //
 // The app sends one message at a time; this function keeps each person's conversation, applies
-// the daily allowance for people without Community Plus, asks Claude with the standing
-// instructions below, and sends the reply back. The Claude API key lives only here, as the
-// ANTHROPIC_API_KEY secret, never inside the app.
+// the daily allowance for people without Community Plus, asks Gemini with the standing
+// instructions below, and sends the reply back. The Google AI key lives only here, as the
+// GEMINI_API_KEY secret, never inside the app.
 //
 // Supabase verifies the caller's Clerk session token before this code runs (verify_jwt), so the
 // token's `sub` is trusted here as the person's id.
@@ -14,7 +14,7 @@ const FREE_MESSAGES_A_DAY = 15;
 const HISTORY = 24;
 /** Erha's own account in the app. When the app passes a thread with this account, the reply is sent there as a chat message. */
 const ERHA_ID = Deno.env.get('ERHA_USER_ID') ?? 'user_3KTkRcnk7CCL3EaTDjWtptR4YMO';
-const MODEL = Deno.env.get('ERHA_MODEL') ?? 'claude-sonnet-5-5';
+const MODEL = Deno.env.get('ERHA_MODEL') ?? 'gemini-3.8-flash';
 
 const INSTRUCTIONS = `You are Erha, the assistant inside Community, a social app for a Seventh-day Adventist church family.
 
@@ -87,9 +87,9 @@ Deno.serve(async (req: Request) => {
     if (chat) await db.from('community_messages').insert({ thread_id: chat, sender_id: ERHA_ID, text: content.slice(0, 5000) });
   };
 
-  const key = Deno.env.get('ANTHROPIC_API_KEY');
+  const key = Deno.env.get('GEMINI_API_KEY') ?? Deno.env.get('GOOGLE_API_KEY');
   if (!key) {
-    const why = 'Erha is not set up yet. An admin needs to add the Claude API key.';
+    const why = 'Erha is not set up yet. An admin needs to add the Google AI (Gemini) API key.';
     await say(why);
     return json({ error: why }, 503);
   }
@@ -120,27 +120,30 @@ Deno.serve(async (req: Request) => {
   const { data: past } = await db.from('community_erha_messages').select('role, content').eq('user_id', me).order('created_at', { ascending: false }).limit(HISTORY);
   const history: Row[] = ((past ?? []) as Row[]).reverse();
   const messages: Row[] = [...history, { role: 'user', content: text }];
-  // Claude needs the turns to alternate and to start with the person.
-  const turns: Row[] = [];
-  for (const m of messages) {
-    if (turns.length === 0 && m.role !== 'user') continue;
-    if (turns.length && turns[turns.length - 1].role === m.role) turns[turns.length - 1] = { role: m.role, content: turns[turns.length - 1].content + '\n\n' + m.content };
-    else turns.push(m);
-  }
+  
+  // Build Gemini contents format
+  const contents = messages.map(m => ({
+    role: m.role === 'assistant' ? 'model' : 'user',
+    parts: [{ text: m.content }]
+  }));
 
-  const res = await fetch('https://api.anthropic.com/v1/messages', {
+  const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${key}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01' },
-    body: JSON.stringify({ model: MODEL, max_tokens: 1024, system: INSTRUCTIONS, messages: turns }),
+    headers: { 'Content-Type': 'application/json', 'User-Agent': 'aistudio-build' },
+    body: JSON.stringify({
+      systemInstruction: { parts: [{ text: INSTRUCTIONS }] },
+      contents,
+      generationConfig: { temperature: 0.7 }
+    }),
   });
   if (!res.ok) {
     const detail = await res.text().catch(() => '');
-    console.error('anthropic', res.status, detail.slice(0, 500));
-    const why = res.status === 401 ? 'The Claude API key is not valid. An admin needs to check it.' : res.status === 429 ? 'Erha is busy right now. Try again in a moment.' : 'Erha could not answer just now. Try again.';
+    console.error('gemini', res.status, detail.slice(0, 500));
+    const why = res.status === 401 || res.status === 403 ? 'The Google AI API key is not valid. An admin needs to check it.' : res.status === 429 ? 'Erha is busy right now. Try again in a moment.' : 'Erha could not answer just now. Try again.';
     return json({ error: why }, 502);
   }
   const data = await res.json();
-  const reply = Array.isArray(data?.content) ? data.content.filter((c: { type: string }) => c.type === 'text').map((c: { text: string }) => c.text).join('\n').trim() : '';
+  const reply = data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() ?? '';
   if (!reply) return json({ error: 'Erha could not answer just now. Try again.' }, 502);
 
   await db.from('community_erha_messages').insert([

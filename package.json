@@ -20,6 +20,7 @@
     "@expo-google-fonts/lora": "^0.4.0",
     "@expo-google-fonts/nunito": "^0.4.0",
     "@expo-google-fonts/poppins": "^0.4.0",
+    "@google/genai": "^2.28.0",
     "@react-native-async-storage/async-storage": "2.2.0",
     "@stripe/stripe-react-native": "0.65.1",
     "@supabase/supabase-js": "2.57.4",

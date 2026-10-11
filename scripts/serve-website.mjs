@@ -25,9 +25,66 @@ const MIME_TYPES = {
   '.webmanifest': 'application/manifest+json',
 };
 
-const server = http.createServer((req, res) => {
+import { GoogleGenAI } from '@google/genai';
+
+const ai = new GoogleGenAI({
+  apiKey: process.env.GEMINI_API_KEY,
+  httpOptions: {
+    headers: {
+      'User-Agent': 'aistudio-build',
+    },
+  },
+});
+
+const ERHA_INSTRUCTIONS = `You are Erha, the assistant inside Community, a social app for a Seventh-day Adventist church family.
+You help with the Bible, Sabbath School, hymns, prayer, Adventist beliefs, and church fellowship. Keep answers warm, humble, concise, scripturally grounded, and respectful.`;
+
+const server = http.createServer(async (req, res) => {
   const parsedUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   let pathname = decodeURIComponent(parsedUrl.pathname);
+
+  // Erha AI endpoint powered by Google AI
+  if (pathname === '/api/erha' && req.method === 'POST') {
+    try {
+      let bodyStr = '';
+      for await (const chunk of req) {
+        bodyStr += chunk;
+      }
+      const body = JSON.parse(bodyStr || '{}');
+      const text = String(body.text || body.prompt || '').trim();
+      if (!text) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: 'Text prompt required' }));
+      }
+
+      const history = Array.isArray(body.history) ? body.history : [];
+      const contents = history.map(h => ({
+        role: h.role === 'assistant' ? 'model' : 'user',
+        parts: [{ text: h.content }]
+      }));
+      contents.push({ role: 'user', parts: [{ text }] });
+
+      const aiResponse = await ai.models.generateContent({
+        model: 'gemini-3.8-flash',
+        contents,
+        config: {
+          systemInstruction: ERHA_INSTRUCTIONS,
+          temperature: 0.7,
+        },
+      });
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ 
+        reply: aiResponse.text || 'Peace be with you. How can I assist your study today?',
+        model: 'gemini-3.8-flash'
+      }));
+    } catch (err) {
+      console.error('Erha AI error:', err);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Erha is momentarily unavailable. Please try again.' }));
+    }
+    return;
+  }
 
   // Security check: avoid directory traversal
   let safePath = path.normalize(pathname).replace(/^(\.\.[\/\\])+/, '');
