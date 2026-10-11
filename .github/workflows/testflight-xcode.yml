@@ -1,0 +1,114 @@
+name: Community TestFlight (Xcode)
+
+# Checks the app on Linux, then builds it with Xcode on a GitHub Mac and uploads it to TestFlight.
+# Runs on every push to the community-app branch that changes the app. A failed run can be started
+# again from the Actions tab with "Re-run all jobs". (The "Run workflow" button only appears for
+# workflows that live on the repository's default branch, which this one does not.)
+
+on:
+  push:
+    branches: [community-app]
+    paths-ignore:
+      - README.md
+      - supabase/**
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: community-testflight
+  cancel-in-progress: true
+
+env:
+  # Repository variables (Settings → Secrets and variables → Actions → Variables) win when set, so
+  # a new key can be swapped in without editing this file.
+  ASC_KEY_ID: ${{ vars.ASC_KEY_ID || 'PD6DWK7T4C' }}
+  ASC_ISSUER_ID: ${{ vars.ASC_ISSUER_ID || '232fdb99-c796-444e-8430-34452fd67484' }}
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install, type-check and bundle
+        run: bash scripts/ci-check.sh
+      - name: Save logs
+        if: always()
+        run: bash scripts/ci-publish-logs.sh check
+
+  testflight:
+    needs: check
+    runs-on: macos-15
+    timeout-minutes: 110
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Use the newest Xcode 26 on this Mac
+        run: |
+          mkdir -p "$RUNNER_TEMP/logs"; exec > >(tee -a "$RUNNER_TEMP/logs/setup.txt") 2>&1
+          ls -ld /Applications/Xcode*.app
+          # A beta can hide behind a tidy name (Xcode_26.3.app -> Xcode_26.3_beta.app), so look at where each one really lives.
+          resolve() { for x in "$@"; do if [ -d "$x" ]; then (cd "$x" && pwd -P); fi; done | { grep -viE 'beta|candidate' || true; } | sort -u -V | tail -1; }
+          XC=$(resolve /Applications/Xcode_26*.app)
+          if [ -z "$XC" ]; then XC=$(resolve /Applications/Xcode_*.app); fi
+          echo "using $XC"
+          sudo xcode-select -s "$XC/Contents/Developer"
+          xcodebuild -version
+      - name: Collect the Apple key, certificate and profile
+        env:
+          # The safe place for these is the repository's Actions secrets (base64 of each file). While
+          # they aren't set, the copies committed on this branch are used, as before.
+          ASC_KEY_P8_BASE64: ${{ secrets.ASC_KEY_P8_BASE64 }}
+          DIST_KEY_BASE64: ${{ secrets.DIST_KEY_BASE64 }}
+          DIST_CER_BASE64: ${{ secrets.DIST_CER_BASE64 }}
+          PROFILE_BASE64: ${{ secrets.PROFILE_BASE64 }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/logs"; exec > >(tee -a "$RUNNER_TEMP/logs/setup.txt") 2>&1
+          mkdir -p "$RUNNER_TEMP/signing"
+          KEY_FILE="$RUNNER_TEMP/AuthKey_$ASC_KEY_ID.p8"
+          # Older copies of this project kept the files only on main, so main is still tried as a fallback.
+          git fetch --quiet --depth 1 origin main || true
+          take() { # $1 = secret's value (base64), $2 = path in the repository, $3 = where to put it
+            if [ -n "$1" ]; then printf '%s' "$1" | base64 --decode > "$3" && [ -s "$3" ] && echo "$2: from secrets" && return 0; fi
+            if [ -s "$2" ]; then cp "$2" "$3" && echo "$2: from this branch"; return 0; fi
+            if git show "FETCH_HEAD:$2" > "$3" 2> /dev/null && [ -s "$3" ]; then echo "$2: from main"; return 0; fi
+            rm -f "$3"; echo "$2: MISSING"; return 1
+          }
+          take "$ASC_KEY_P8_BASE64" "ios/fastlane/AuthKey_$ASC_KEY_ID.p8" "$KEY_FILE" || {
+            echo "The App Store Connect key is not in the secrets or the repository, so nothing could be uploaded."
+            exit 1
+          }
+          take "$DIST_KEY_BASE64" ios/PRZR6A95J9.p12 "$RUNNER_TEMP/signing/dist.p12" || true
+          take "$DIST_CER_BASE64" ios/PRZR6A95J9.cer "$RUNNER_TEMP/signing/dist.cer" || true
+          take "$PROFILE_BASE64" ios/AppStore_Kojo.SDAAPPGEMINI.mobileprovision "$RUNNER_TEMP/signing/app.mobileprovision" || true
+          chmod 600 "$KEY_FILE"
+          chmod 600 "$RUNNER_TEMP"/signing/* 2> /dev/null || true
+          echo "ASC_KEY_PATH=$KEY_FILE" >> "$GITHUB_ENV"
+          echo "SIGN_DIR=$RUNNER_TEMP/signing" >> "$GITHUB_ENV"
+          echo "BUILD_NUMBER=$((GITHUB_RUN_NUMBER + 100))" >> "$GITHUB_ENV"
+      - name: Build with Xcode and upload to TestFlight
+        timeout-minutes: 95
+        run: bash scripts/ci-testflight.sh
+      - name: Remove the key and certificate
+        if: always()
+        run: |
+          rm -rf "$RUNNER_TEMP"/AuthKey_*.p8 "$RUNNER_TEMP/signing" "$HOME/.appstoreconnect/private_keys"
+          security delete-keychain "$RUNNER_TEMP/community-signing.keychain-db" > /dev/null 2>&1 || true
+      - name: Save logs
+        if: always()
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/logs"; echo "job status: $JOB_STATUS" >> "$RUNNER_TEMP/logs/job.txt"
+          bash scripts/ci-publish-logs.sh testflight

@@ -1,0 +1,8 @@
+{
+  "name": "App Importer & Workspace",
+  "description": "Connect and run your existing application repository in Google AI Studio.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
