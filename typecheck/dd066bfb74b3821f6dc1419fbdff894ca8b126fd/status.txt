@@ -1,0 +1,11 @@
+started 2026-10-28T19:21:17Z
+v22.23.4
+10.9.9
+npm install: 0
+npm audit (high and above): 1
+expo install --check: 1
+tsc: 2
+expo export: 0
+RESULT: FAILED (type errors: see tsc.log)
+finished 2026-10-28T19:23:25Z
+job status: failure
